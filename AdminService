@@ -1,0 +1,253 @@
+-- Source Chatgpt x Deepseek 
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
+
+-- Secure remote event creation
+local function createSecureRemote(name)
+    local remote = ReplicatedStorage:FindFirstChild(name)
+    if not remote then
+        remote = Instance.new("RemoteEvent")
+        remote.Name = name
+        remote.Parent = ReplicatedStorage
+    end
+    return remote
+end
+
+local ADMIN_REMOTE = createSecureRemote("AdminRemote")
+local GUI_TOGGLE = createSecureRemote("AdminGuiToggle")
+local FEEDBACK = createSecureRemote("AdminFeedback")
+
+-- CONFIG: ganti sesuai kebutuhan
+local ALLOWED_USERIDS = {
+    12345678, -- contoh UserId admin
+    -- tambahkan user id admin lain
+}
+
+local COMMAND_FOLDER = script:WaitForChild("AdminCommands") -- folder ModuleScript
+
+-- Rate limiting
+local commandCooldowns = {}
+local COMMAND_COOLDOWN = 0.5 -- seconds between commands per user
+
+-- helper: cek admin
+local function isAdmin(userId)
+    for _, id in ipairs(ALLOWED_USERIDS) do
+        if id == userId then return true end
+    end
+    return false
+end
+
+-- simple lowercase helper
+local function lc(s) return tostring(s):lower() end
+
+-- Levenshtein distance for suggestion (basic)
+local function levenshtein(a, b)
+    a = lc(a); b = lc(b)
+    local la, lb = #a, #b
+    if la == 0 then return lb end
+    if lb == 0 then return la end
+    local row = {}
+    for i=0,lb do row[i] = i end
+    for i=1,la do
+        local prev = row[0]
+        row[0] = i
+        for j=1,lb do
+            local cur = row[j]
+            local cost = (a:sub(i,i) == b:sub(j,j)) and 0 or 1
+            local v = math.min(row[j] + 1, row[j-1] + 1, prev + cost)
+            prev = cur
+            row[j] = v
+        end
+    end
+    return row[lb]
+end
+
+-- Utility function to find players (used by commands)
+function findPlayers(searchTerm, issuer)
+    searchTerm = lc(searchTerm)
+    
+    if searchTerm == "all" then
+        return Players:GetPlayers()
+    elseif searchTerm == "others" then
+        local others = {}
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= issuer then
+                table.insert(others, player)
+            end
+        end
+        return others
+    elseif searchTerm == "me" then
+        return {issuer}
+    else
+        local found = {}
+        for _, player in ipairs(Players:GetPlayers()) do
+            if lc(player.Name) == searchTerm or player.DisplayName:lower() == searchTerm then
+                return {player} -- Exact match
+            end
+            
+            if player.Name:lower():find(searchTerm, 1, true) or 
+               player.DisplayName:lower():find(searchTerm, 1, true) then
+                table.insert(found, player)
+            end
+        end
+        return found
+    end
+end
+
+-- Load command modules
+local Commands = {} -- map name/alias -> command module
+local CommandList = {} -- array of modules
+local function loadCommands()
+    Commands = {}
+    CommandList = {}
+    for _, obj in ipairs(COMMAND_FOLDER:GetChildren()) do
+        if obj:IsA("ModuleScript") then
+            local ok, mod = pcall(require, obj)
+            if ok and type(mod)=="table" and mod.name then
+                table.insert(CommandList, mod)
+                -- register name and aliases
+                Commands[lc(mod.name)] = mod
+                if mod.aliases then
+                    for _, a in ipairs(mod.aliases) do
+                        Commands[lc(a)] = mod
+                    end
+                end
+            else
+                warn("Failed to load command module:", obj.Name, mod)
+            end
+        end
+    end
+end
+
+-- reload on start
+loadCommands()
+
+-- provide function to get suggestions
+local function getBestSuggestion(cmdName)
+    cmdName = lc(cmdName)
+    local best, bestScore = nil, math.huge
+    for _, mod in ipairs(CommandList) do
+        for _, cand in ipairs({mod.name, unpack(mod.aliases or {})}) do
+            local d = levenshtein(cmdName, cand)
+            if d < bestScore then
+                bestScore, best = d, cand
+            end
+        end
+    end
+    return best, bestScore
+end
+
+-- parse command string into (cmdName, args array)
+local function parseCommand(raw)
+    raw = raw or ""
+    raw = raw:gsub("^%s+", ""):gsub("%s+$", "")
+    if raw == "" then return nil end
+    -- allow ; or / prefix; normalize
+    if raw:sub(1,1) == ";" or raw:sub(1,1) == "/" then
+        raw = raw:sub(2)
+    end
+    local parts = {}
+    for token in raw:gmatch("%S+") do
+        table.insert(parts, token)
+    end
+    local cmd = parts[1] and lc(parts[1]) or nil
+    local args = {}
+    for i=2,#parts do table.insert(args, parts[i]) end
+    return cmd, args
+end
+
+-- Safe command execution with cooldown and validation
+local function executeCommand(player, raw)
+    -- Rate limiting
+    local now = os.clock()
+    if commandCooldowns[player.UserId] and now - commandCooldowns[player.UserId] < COMMAND_COOLDOWN then
+        FEEDBACK:FireClient(player, "error", "Command cooldown. Wait a moment.")
+        return
+    end
+    commandCooldowns[player.UserId] = now
+
+    if not isAdmin(player.UserId) then
+        FEEDBACK:FireClient(player, "error", "You are not admin.")
+        return
+    end
+
+    -- Sanitize input
+    if type(raw) ~= "string" then
+        FEEDBACK:FireClient(player, "error", "Invalid command format.")
+        return
+    end
+    
+    -- Limit command length
+    if #raw > 200 then
+        FEEDBACK:FireClient(player, "error", "Command too long.")
+        return
+    end
+
+    local cmdName, args = parseCommand(raw)
+    if not cmdName then
+        FEEDBACK:FireClient(player, "error", "Empty command.")
+        return
+    end
+
+    local cmdModule = Commands[cmdName]
+    if not cmdModule then
+        -- suggest best match
+        local best, score = getBestSuggestion(cmdName)
+        if best and score <= 2 then -- threshold; sesuaikan
+            FEEDBACK:FireClient(player, "suggest", ("Command '%s' not found. Did you mean '%s'?"):format(cmdName, best))
+        else
+            FEEDBACK:FireClient(player, "error", ("Command '%s' not found."):format(cmdName))
+        end
+        return
+    end
+
+    -- permission check (module may define permission function)
+    if cmdModule.permission then
+        local ok, msg = pcall(cmdModule.permission, player, args)
+        if not ok or msg == false then
+            FEEDBACK:FireClient(player, "error", "You can't run this command.")
+            return
+        end
+    end
+
+    -- run command (protected)
+    local ok, err = pcall(function()
+        cmdModule.run(player, args, raw, FEEDBACK, findPlayers)
+    end)
+    if not ok then
+        warn("Command error from " .. player.Name .. ":", err)
+        FEEDBACK:FireClient(player, "error", "Command execution error.")
+    end
+end
+
+-- listen remote event with validation
+ADMIN_REMOTE.OnServerEvent:Connect(function(player, rawCommand)
+    -- Validate player is legit
+    if not Players:FindFirstChild(player.Name) then return end
+    
+    executeCommand(player, rawCommand)
+end)
+
+-- On player join: tell client whether to show GUI
+Players.PlayerAdded:Connect(function(player)
+    local allowed = isAdmin(player.UserId)
+    GUI_TOGGLE:FireClient(player, allowed)
+end)
+
+-- Handle player leaving
+Players.PlayerRemoving:Connect(function(player)
+    commandCooldowns[player.UserId] = nil
+end)
+
+-- expose reload (dev only)
+if RunService:IsStudio() then
+    -- allow reload via a developer console if needed
+    function _G.ReloadAdminCommands()
+        loadCommands()
+        print("Admin commands reloaded.")
+    end
+end
+
+print("AdminService loaded.")
