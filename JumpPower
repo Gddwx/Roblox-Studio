@@ -1,0 +1,98 @@
+-- Source ChatGPT x DeepSeek (ModuleScript)
+local module = {}
+module.name = "jumppower"
+module.aliases = {"jp"}
+-- permission: optional; return true to allow
+module.permission = function(player, args)
+    -- contohnya: semua admin boleh
+    return true
+end
+
+-- run(player, args, raw, feedbackFunc, findPlayersFunc)
+function module.run(issuer, args, raw, feedback, findPlayers)
+    if #args == 0 then
+        -- no arg: show usage
+        feedback:FireClient(issuer, "info", "Usage: ;jp <num> | ;jp <player> <num> | ;jp all <num> | ;jp others <num>")
+        return
+    end
+
+    -- parse possible forms
+    -- form A: ;jp <num>
+    -- form B: ;jp <player> <num>
+    -- form C: ;jp all <num>
+    -- form D: ;jp others <num>
+
+    local first = args[1]
+    local second = args[2]
+
+    -- helper to set JP for a player
+    local function setJPForPlayer(p, val)
+        if not p or not p.Character then 
+            return false, "No character"
+        end
+        local humanoid = p.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid.JumpPower = val
+            return true
+        end
+        return false, "No humanoid"
+    end
+
+    -- decide target(s) and value
+    local targets = {}
+    local value = nil
+
+    if #args == 1 then
+        -- could be number only
+        local n = tonumber(first)
+        if n then
+            -- set self
+            table.insert(targets, issuer)
+            value = math.clamp(n, 0, 500) -- clamp safety
+        else
+            -- single arg non-number: show usage
+            feedback:FireClient(issuer, "error", "Missing value. Usage: ;jp <num> | ;jp <player> <num>")
+            return
+        end
+    else
+        -- #args >=2
+        local targetArg = first
+        local maybeNum = tonumber(second)
+        
+        if not maybeNum then
+            feedback:FireClient(issuer, "error", "Invalid number: " .. tostring(second))
+            return
+        end
+        
+        -- Find targets using the provided findPlayers function
+        targets = findPlayers(targetArg, issuer)
+        
+        if #targets == 0 then
+            feedback:FireClient(issuer, "error", "No players found matching: " .. targetArg)
+            return
+        end
+        
+        value = math.clamp(maybeNum, 0, 500)
+    end
+
+    -- finally set value
+    local successes, failures = 0, 0
+    for _, p in ipairs(targets) do
+        local ok, err = setJPForPlayer(p, value)
+        if ok then
+            successes = successes + 1
+            feedback:FireClient(issuer, "success", ("Set JumpPower %d for %s"):format(value, p.Name))
+        else
+            failures = failures + 1
+            feedback:FireClient(issuer, "warning", ("Failed to set for %s: %s"):format(p.Name, err or "Unknown error"))
+        end
+    end
+    
+    if successes > 0 and failures == 0 then
+        feedback:FireClient(issuer, "success", ("Successfully set JumpPower for %d players"):format(successes))
+    elseif failures > 0 then
+        feedback:FireClient(issuer, "warning", ("Set JumpPower: %d successes, %d failures"):format(successes, failures))
+    end
+end
+
+return module
