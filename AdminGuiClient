@@ -1,0 +1,122 @@
+-- Source ChatGPT x DeepSeek StarterPlayerScripts (LocalScript)
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local player = Players.LocalPlayer
+
+local GUI_TOGGLE = ReplicatedStorage:WaitForChild("AdminGuiToggle")
+local ADMIN_REMOTE = ReplicatedStorage:WaitForChild("AdminRemote")
+local FEEDBACK = ReplicatedStorage:WaitForChild("AdminFeedback")
+
+-- Create GUI only when needed
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "AdminGui"
+screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = true
+screenGui.Enabled = false -- Start disabled until server confirms admin status
+screenGui.Parent = player:WaitForChild("PlayerGui")
+
+-- Styling
+local backgroundColor = Color3.fromRGB(40, 40, 40)
+local textColor = Color3.fromRGB(255, 255, 255)
+local errorColor = Color3.fromRGB(255, 100, 100)
+local successColor = Color3.fromRGB(100, 255, 100)
+local infoColor = Color3.fromRGB(200, 200, 200)
+local suggestColor = Color3.fromRGB(255, 200, 100)
+
+-- container
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0, 400, 0, 80)
+frame.Position = UDim2.new(0.5, -200, 0, 20)
+frame.AnchorPoint = Vector2.new(0.5, 0)
+frame.BackgroundColor3 = backgroundColor
+frame.BackgroundTransparency = 0.4
+frame.BorderSizePixel = 0
+frame.Parent = screenGui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 8)
+corner.Parent = frame
+
+local box = Instance.new("TextBox")
+box.PlaceholderText = "Type admin command, e.g. ;jp 35 or ;jp player 50"
+box.Size = UDim2.new(1, -20, 0, 36)
+box.Position = UDim2.new(0, 10, 0, 10)
+box.Parent = frame
+box.ClearTextOnFocus = false
+box.Text = ""
+box.TextColor3 = textColor
+box.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+box.Font = Enum.Font.Gotham
+box.TextSize = 14
+
+local boxCorner = Instance.new("UICorner")
+boxCorner.CornerRadius = UDim.new(0, 4)
+boxCorner.Parent = box
+
+local infoLabel = Instance.new("TextLabel")
+infoLabel.Size = UDim2.new(1, -20, 0, 30)
+infoLabel.Position = UDim2.new(0, 10, 0, 46)
+infoLabel.Text = ""
+infoLabel.TextWrapped = true
+infoLabel.TextColor3 = textColor
+infoLabel.BackgroundTransparency = 1
+infoLabel.Font = Enum.Font.Gotham
+infoLabel.TextSize = 12
+infoLabel.TextXAlignment = Enum.TextXAlignment.Left
+infoLabel.Parent = frame
+
+-- toggle from server
+GUI_TOGGLE.OnClientEvent:Connect(function(allowed)
+    screenGui.Enabled = allowed
+    if not allowed then
+        infoLabel.Text = "Admin privileges not granted"
+        infoLabel.TextColor3 = errorColor
+    end
+end)
+
+-- send command to server when pressed Enter
+box.FocusLost:Connect(function(enterPressed)
+    if enterPressed then
+        local txt = box.Text:gsub("^%s+", ""):gsub("%s+$", "")
+        if txt and txt:match("%S") then
+            ADMIN_REMOTE:FireServer(txt)
+            box.Text = ""
+        end
+    end
+end)
+
+-- feedback handler (server -> client)
+local lastMessageTime = 0
+FEEDBACK.OnClientEvent:Connect(function(kind, msg)
+    -- kinds: "error","info","suggest","success","warning"
+    local now = tick()
+    
+    -- Prevent message spamming
+    if now - lastMessageTime < 0.1 then
+        return
+    end
+    lastMessageTime = now
+    
+    infoLabel.Text = tostring(msg)
+    
+    -- Set color based on message type
+    if kind == "error" then
+        infoLabel.TextColor3 = errorColor
+    elseif kind == "success" then
+        infoLabel.TextColor3 = successColor
+    elseif kind == "suggest" then
+        infoLabel.TextColor3 = suggestColor
+    else
+        infoLabel.TextColor3 = infoColor
+    end
+    
+    -- Auto-clear after delay
+    task.delay(5, function()
+        if infoLabel.Text == msg then
+            infoLabel.Text = ""
+        end
+    end)
+end)
+
+-- Hide GUI by default until server confirms admin status
+screenGui.Enabled = false
